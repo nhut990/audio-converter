@@ -58,12 +58,20 @@
 
         .file-input-wrapper {
             position: relative;
-            display: inline-block;
+            display: block;
             width: 100%;
         }
 
+        /* NGUYÊN TẮC: Ẩn input nhưng vẫn cho phép tương tác trên mobile */
         input[type="file"] {
-            display: none;
+            position: absolute;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            z-index: 10;
         }
 
         .file-input-label {
@@ -76,14 +84,16 @@
             cursor: pointer;
             transition: all 0.3s ease;
             background-color: #f8f9ff;
+            position: relative;
+            pointer-events: none;
         }
 
-        .file-input-label:hover {
+        .file-input-wrapper:hover .file-input-label {
             background-color: #f0f2ff;
             border-color: #764ba2;
         }
 
-        .file-input-label.dragover {
+        .file-input-wrapper.dragover .file-input-label {
             background-color: #e8ebff;
             border-color: #764ba2;
         }
@@ -411,7 +421,7 @@
 
         <div class="form-group">
             <label>Chọn File Âm Thanh</label>
-            <div class="file-input-wrapper">
+            <div class="file-input-wrapper" id="fileWrapper">
                 <input type="file" id="audioFile" accept="audio/*">
                 <label for="audioFile" class="file-input-label" id="fileLabel">
                     📁 Kéo file vào hoặc click để chọn
@@ -487,6 +497,7 @@
     <script>
         const audioFile = document.getElementById('audioFile');
         const fileLabel = document.getElementById('fileLabel');
+        const fileWrapper = document.getElementById('fileWrapper');
         const fileName = document.getElementById('fileName');
         const convertBtn = document.getElementById('convertBtn');
         const resetBtn = document.getElementById('resetBtn');
@@ -509,18 +520,18 @@
         audioFile.addEventListener('change', handleFileSelect);
 
         // Xử lý drag and drop
-        fileLabel.addEventListener('dragover', (e) => {
+        fileWrapper.addEventListener('dragover', (e) => {
             e.preventDefault();
-            fileLabel.classList.add('dragover');
+            fileWrapper.classList.add('dragover');
         });
 
-        fileLabel.addEventListener('dragleave', () => {
-            fileLabel.classList.remove('dragover');
+        fileWrapper.addEventListener('dragleave', () => {
+            fileWrapper.classList.remove('dragover');
         });
 
-        fileLabel.addEventListener('drop', (e) => {
+        fileWrapper.addEventListener('drop', (e) => {
             e.preventDefault();
-            fileLabel.classList.remove('dragover');
+            fileWrapper.classList.remove('dragover');
             const files = e.dataTransfer.files;
             if (files.length > 0) {
                 audioFile.files = files;
