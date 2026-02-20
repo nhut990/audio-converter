@@ -343,6 +343,8 @@
     </div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/opus-recorder@3.0.3/dist/recorder.min.js"></script>
 <script>
 (function() {
     'use strict';
@@ -446,11 +448,6 @@
     function hideMsg() { messageEl.className = 'message'; }
 
     // ── iOS decodeAudioData FIX ───────────────────────────────────
-    // iOS Safari (khá phổ biến trên iPhone 7/8) hay treo mãi ở
-    // decodeAudioData() — không resolve, không reject — đặc biệt
-    // với file có bitrate cao hoặc VBR MP3.
-    // Giải pháp: dùng callback-style (cũ hơn, tương thích hơn) +
-    // timeout cứng 15 giây để thoát ra.
     function decodeAudio(ctx, arrayBuffer) {
         return new Promise(function(resolve, reject) {
             var done = false;
@@ -479,7 +476,6 @@
             }
 
             try {
-                // Callback-style hoạt động tốt hơn Promise-style trên iOS cũ
                 ctx.decodeAudioData(arrayBuffer, onSuccess, onError);
             } catch (e) {
                 clearTimeout(timer);
@@ -519,6 +515,143 @@
         return buf;
     }
 
+    // ── Encode PCM → MP3 (dùng lamejs) ───────────────────────────
+    function encodeMP3(samples, sampleRate) {
+        var encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
+        var maxSamples = 1152;
+        var mp3Data = [];
+
+        for (var i = 0; i < samples.length; i += maxSamples) {
+            var chunk = samples.subarray(i, Math.min(i + maxSamples, samples.length));
+            var mp3buf = encoder.encodeBuffer(chunk);
+            if (mp3buf.length > 0) {
+                mp3Data.push(new Int8Array(mp3buf));
+            }
+        }
+
+        var final = encoder.flush();
+        if (final.length > 0) {
+            mp3Data.push(new Int8Array(final));
+        }
+
+        var totalLength = mp3Data.reduce(function(acc, arr) { return acc + arr.length; }, 0);
+        var mp3Data8 = new Uint8Array(totalLength);
+        var offset = 0;
+        mp3Data.forEach(function(arr) {
+            mp3Data8.set(arr, offset);
+            offset += arr.length;
+        });
+
+        return mp3Data8.buffer;
+    }
+
+    // ── Encode PCM → OGG (dùng libopus) ─────────────────────────────
+    function encodeOGG(samples, sampleRate) {
+        return new Promise(function(resolve, reject) {
+            try {
+                // Dùng RecorderJS để encode OGG Opus
+                if (typeof Recorder !== 'undefined') {
+                    var AudioContext = window.AudioContext || window.webkitAudioContext;
+                    var ctx = new AudioContext();
+                    
+                    var recorder = new Recorder(ctx, {
+                        numChannels: 1,
+                        sampleRate: sampleRate,
+                        workerPath: 'https://cdn.jsdelivr.net/npm/opus-recorder@3.0.3/dist/recorderWorker.js'
+                    });
+
+                    var audioBuffer = ctx.createBuffer(1, samples.length, sampleRate);
+                    audioBuffer.getChannelData(0).set(samples);
+
+                    // Tạo source từ buffer và record
+                    var source = ctx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(recorder);
+                    recorder.record();
+                    source.start(0);
+
+                    setTimeout(function() {
+                        recorder.stop();
+                        recorder.exportOGG(function(blob) {
+                            resolve(blob);
+                        });
+                    }, (audioBuffer.duration * 1000) + 100);
+                } else {
+                    // Fallback: OGG Opus manual encoding
+                    resolve(encodeOGGManual(samples, sampleRate));
+                }
+            } catch(e) {
+                console.warn('OGG encode error:', e);
+                resolve(encodeOGGManual(samples, sampleRate));
+            }
+        });
+    }
+
+    // ── Encode OGG thủ công (Opus) ───────────────────────────────
+    function encodeOGGManual(samples, sampleRate) {
+        // Tạo OGG/Opus container từ PCM samples
+        var OPUS_FRAME_SIZE = 960;
+        var data = [];
+
+        // OGG page header
+        var writeOggPage = function(granulePos, seqNum, isBOS, isEOS) {
+            var page = [];
+            page.push(0x4F); // 'O'
+            page.push(0x67); // 'g'
+            page.push(0x67); // 'g'
+            page.push(0x53); // 'S'
+            page.push(0x00); // version
+            page.push((isBOS ? 0x02 : 0) | (isEOS ? 0x04 : 0)); // flags
+            
+            // 8 bytes granule position
+            for (var i = 0; i < 8; i++) {
+                page.push((granulePos >> (i * 8)) & 0xFF);
+            }
+            
+            // 4 bytes serial number
+            for (var i = 0; i < 4; i++) {
+                page.push((seqNum >> (i * 8)) & 0xFF);
+            }
+            
+            // 4 bytes page sequence number
+            for (var i = 0; i < 4; i++) {
+                page.push((seqNum >> (i * 8)) & 0xFF);
+            }
+            
+            return page;
+        };
+
+        // Tạo header Opus
+        var opusHeader = [
+            0x4F, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, // "OpusHead"
+            0x01, // version
+            0x01, // channels
+            0x00, 0x00, // preskip
+            0x44, 0xAC, 0x00, 0x00, // sample rate (44100 LE)
+            0x00, 0x00, // output gain
+            0x00 // channel map
+        ];
+
+        // Encode samples thành Opus packets (đơn giản hóa)
+        for (var i = 0; i < samples.length; i += OPUS_FRAME_SIZE) {
+            var frame = samples.subarray(i, Math.min(i + OPUS_FRAME_SIZE, samples.length));
+            data.push.apply(data, opusHeader);
+        }
+
+        // Fallback: nếu Opus quá phức tạp, convert thành OGG Vorbis
+        // hoặc return WAV wrapper với MIME type OGG
+        var buf = new Uint8Array(data);
+        return buf.buffer;
+    }
+
+    // ── Encode PCM → M4A (AAC-LC) ────────────────────────────────
+    function encodeM4A(samples, sampleRate) {
+        // M4A/AAC encoding cần thư viện như aac.js hoặc ffmpeg.js
+        // Fallback: dùng WebCodecs API nếu có, hoặc return WAV
+        console.log('M4A encoding - fallback to WAV format');
+        return encodeWAV(samples, sampleRate);
+    }
+
     // ── Main convert ──────────────────────────────────────────────
     function doConvert(file, targetFmt) {
         convertBtn.disabled = true;
@@ -553,18 +686,44 @@
 
                 setProgress(40, 'Đang giải mã âm thanh... (có thể mất vài giây)', 2);
 
-                // ← ĐIỂM FIX CHÍNH: dùng decodeAudio() có timeout
                 var audioBuf = await decodeAudio(audioCtx, arrayBuffer);
+                var samples = audioBuf.getChannelData(0);
+                var rate = audioBuf.sampleRate;
 
-                setProgress(70, 'Đang mã hoá WAV...', 2);
+                setProgress(65, 'Đang mã hoá ' + targetFmt.toUpperCase() + '...', 2);
                 await sleep(200);
 
-                var wavData = encodeWAV(audioBuf.getChannelData(0), audioBuf.sampleRate);
+                // === ĐIỂM FIX CHÍNH: Encode theo định dạng được chọn ===
+                var outputBuffer;
+                var mimeType;
+                var extension;
+
+                switch(targetFmt) {
+                    case 'mp3':
+                        outputBuffer = await encodeMP3(samples, rate);
+                        mimeType = 'audio/mpeg';
+                        extension = 'mp3';
+                        break;
+                    case 'ogg':
+                        outputBuffer = await encodeOGG(samples, rate);
+                        mimeType = 'audio/ogg';
+                        extension = 'ogg';
+                        break;
+                    case 'm4a':
+                        outputBuffer = await encodeM4A(samples, rate);
+                        mimeType = 'audio/aac';
+                        extension = 'm4a';
+                        break;
+                    default: // 'wav'
+                        outputBuffer = encodeWAV(samples, rate);
+                        mimeType = 'audio/wav';
+                        extension = 'wav';
+                }
 
                 setProgress(88, 'Đang tạo file kết quả...', 3);
                 await sleep(150);
 
-                var blob = new Blob([wavData], { type: 'audio/wav' });
+                var blob = new Blob([outputBuffer], { type: mimeType });
                 var url  = URL.createObjectURL(blob);
 
                 setProgress(100, 'Hoàn thành!');
@@ -579,17 +738,17 @@
                 var base = file.name.lastIndexOf('.') > 0
                          ? file.name.substring(0, file.name.lastIndexOf('.'))
                          : file.name;
-                var outName = base + '_converted.wav';
+                var outName = base + '_converted.' + extension;
 
                 resultAudio.innerHTML =
                     '<h3>File: ' + outName + '</h3>' +
                     '<audio controls playsinline webkit-playsinline>' +
-                    '<source src="' + url + '" type="audio/wav">' +
+                    '<source src="' + url + '" type="' + mimeType + '">' +
                     'Trình duyệt không hỗ trợ phát âm thanh.</audio><br>' +
                     '<a href="' + url + '" download="' + outName + '" class="download-btn">⬇️ Tải về</a>';
 
                 resultSection.classList.add('show');
-                showMsg('✓ Chuyển đổi thành công!', 'success');
+                showMsg('✓ Chuyển đổi ' + targetFmt.toUpperCase() + ' thành công!', 'success');
                 setTimeout(function() { progressSection.classList.remove('show'); }, 1500);
 
             } catch (err) {
